@@ -17,28 +17,36 @@ function converttime($chitime)
 	if (preg_match("/(\d{4})年(\d{1,2})月(\d{1,2})日 \(.{3}\) (\d{2})\:(\d{2}) \(UTC\)/", $chitime, $m)) {
 		return strtotime($m[1] . "/" . $m[2] . "/" . $m[3] . " " . $m[4] . ":" . $m[5]);
 	} else {
-		exit("converttime fail\n");
+		echo "converttime fail\n";
+		exit(0);
 	}
 }
 
 echo "The time now is " . date("Y-m-d H:i:s") . " (UTC)\n";
 
+$config_page = file_get_contents($C["config_page"]);
+if ($config_page === false) {
+	echo "get config failed\n";
+	exit(0);
+}
+$cfg = json_decode($config_page, true);
+
+if (!$cfg["enable"]) {
+	echo "disabled\n";
+	exit(0);
+}
+
 login("bot");
 $edittoken = edittoken();
 
-$retention_time = file_get_contents($C["retention_time"]);
-if ($retention_time === false) {
-	$retention_time = $C["retention_time_default"];
-	echo "Warning: fetch retention_time fail, use default value\n";
-}
-echo "archive before " . $retention_time . " ago (" . date("Y-m-d H:i:s", time() - $retention_time) . ")\n";
+echo "archive before " . $cfg['retention_time'] . " ago (" . date("Y-m-d H:i:s", time() - $cfg['retention_time']) . ")\n";
 
-$to_page_number = file_get_contents($C["to_page_number"]);
-if ($to_page_number === false) {
-	$to_page_number = $C["to_page_number_default"];
-	echo "Warning: fetch to_page_number fail, use default value\n";
-}
-echo "archive to " . $to_page_number . "\n";
+$to_page_name = sprintf(
+	$cfg["archive_page_name"],
+	date("Y"),
+	(date("n") <= 6 ? 1 : 2)
+);
+echo "archive to " . $to_page_name . "\n";
 
 for ($i = $C["fail_retry"]; $i > 0; $i--) {
 	$starttimestamp = time();
@@ -50,7 +58,8 @@ for ($i = $C["fail_retry"]; $i > 0; $i--) {
 		"titles" => $C["from_page"],
 	)));
 	if ($res === false) {
-		exit("fetch page fail\n");
+		echo "fetch page fail\n";
+		exit(0);
 	}
 	$res = json_decode($res, true);
 	$pages = current($res["query"]["pages"]);
@@ -96,7 +105,7 @@ for ($i = $C["fail_retry"]; $i > 0; $i--) {
 		if ($lasttime == 0) {
 			$oldpagetext .= $temp . "\n{{null| bot archive time: ~~~~~ }}\n";
 			echo "not archive (bot)\t";
-		} else if (time() - $lasttime > $retention_time) {
+		} else if (time() - $lasttime > $cfg['retention_time']) {
 			$newpagetext .= $temp;
 			$archive_count++;
 			echo "archive\t";
@@ -108,13 +117,14 @@ for ($i = $C["fail_retry"]; $i > 0; $i--) {
 	}
 
 	if ($newpagetext === "") {
-		exit("no change\n");
+		echo "no change\n";
+		exit(0);
 	}
 
 	echo "start edit\n";
 
 	echo "edit main page\n";
-	$summary = $C["summary_prefix"] . "：存檔" . $archive_count . "章節";
+	$summary = sprintf($cfg["main_page_summary"], $archive_count);
 	$post = array(
 		"action" => "edit",
 		"format" => "json",
@@ -137,7 +147,8 @@ for ($i = $C["fail_retry"]; $i > 0; $i--) {
 	if (isset($res["error"])) {
 		echo "edit fail\n";
 		if ($i === 1) {
-			exit("quit\n");
+			echo "quit\n";
+			exit(0);
 		} else {
 			echo "retry\n";
 		}
@@ -146,34 +157,34 @@ for ($i = $C["fail_retry"]; $i > 0; $i--) {
 	}
 }
 
-$page = $C["to_page_prefix"] . $to_page_number;
 $starttimestamp2 = time();
 $res = cURL($C["wikiapi"] . "?" . http_build_query(array(
 	"action" => "query",
 	"prop" => "revisions",
 	"format" => "json",
 	"rvprop" => "content|timestamp",
-	"titles" => $page,
+	"titles" => $to_page_name,
 )));
 $res = json_decode($res, true);
 $pages = current($res["query"]["pages"]);
-$oldtext = "{{Talkarchive}}\n";
+$oldtext = "";
 $basetimestamp2 = null;
 if (!isset($pages["missing"])) {
 	$oldtext = $pages["revisions"][0]["*"];
 	$basetimestamp2 = $pages["revisions"][0]["timestamp"];
-	echo $page . " exist\n";
+	echo $to_page_name . " exist\n";
 } else {
-	echo $page . " not exist\n";
+	echo $to_page_name . " not exist\n";
+	$oldtext = $cfg['archive_page_preload'] . "\n";
 }
 $oldtext .= "\n" . $newpagetext;
 $oldtext = preg_replace("/\n{3,}/", "\n\n", $oldtext);
 
-$summary = $C["summary_prefix"] . "：存檔自[[" . $C["from_page"] . "]]共" . $archive_count . "個章節";
+$summary = sprintf($cfg["archive_page_summary"], $archive_count);
 $post = array(
 	"action" => "edit",
 	"format" => "json",
-	"title" => $page,
+	"title" => $to_page_name,
 	"summary" => $summary,
 	"text" => $oldtext,
 	"token" => $edittoken,
@@ -183,7 +194,7 @@ $post = array(
 if ($basetimestamp2 !== null) {
 	$post["basetimestamp"] = $basetimestamp2;
 }
-echo "edit " . $page . " summary=" . $summary . "\n";
+echo "edit " . $to_page_name . " summary=" . $summary . "\n";
 for ($i = $C["fail_retry"]; $i > 0; $i--) {
 	if (!$C["test"]) {
 		$res = cURL($C["wikiapi"], $post);
@@ -195,7 +206,8 @@ for ($i = $C["fail_retry"]; $i > 0; $i--) {
 	if (isset($res["error"])) {
 		echo "edit fail\n";
 		if ($i === 1) {
-			exit("quit\n");
+			echo "quit\n";
+			exit(0);
 		} else {
 			echo "retry\n";
 		}
